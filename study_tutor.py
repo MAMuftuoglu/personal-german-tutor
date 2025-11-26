@@ -53,6 +53,7 @@ When I ask a question:
       (rules, patterns, structures) - create separate proposals for each type.
     - Add Präsens, Präteritum and Partizip II for verbs
     - Add gender, and plural for nouns
+    - If any explanation is needed, add before examples
     - Add examples for each item
 5.  You MUST create a separate proposal for EACH new item.
 6.  You MUST format EACH proposal on its OWN new line, starting
@@ -81,6 +82,7 @@ Example of a correct response with multiple proposals in Markdown:
     - sie/Sie wissen
 - Past tense (Präteritum): wusste
 - Partizip II: gewusst
+- Explanation: The past tense of 'wissen' is 'wusste' and the partizip II is 'gewusst'.
 - Example: Ich weiß die Antwort. (I know the answer.)
 
 
