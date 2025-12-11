@@ -182,12 +182,12 @@ def _parse_note_for_anki(note_content):
     # Explicit grammar detection: check if note starts with "### Grammar:" or contains "Grammar:" header
     first_line_lower = lines[0].strip().lower()
     if '### grammar:' in first_line_lower or first_line_lower.startswith('### grammar'):
-        return None, None
+        return None, None, 'grammar'
     
     # Check if any line contains a grammar header pattern
     for line in lines[:3]:  # Check first 3 lines for grammar indicators
         if re.search(r'###\s*Grammar:', line, re.IGNORECASE):
-            return None, None
+            return None, None, 'grammar'
 
     # Vocabulary detection: look for bolded German word/phrase
     # Pattern matches: "- **der Wal** (masc.): whale" or "* **wissen** (verb): to know"
@@ -211,10 +211,10 @@ def _parse_note_for_anki(note_content):
         # This preserves all formatting: bold, italic, lists, indentation
         back_html = _markdown_to_html_for_anki(full_back_content)
         
-        return front, back_html
+        return front, back_html, None
         
     # If no vocabulary pattern found, it's not a vocabulary note
-    return None, None
+    return None, None, None
 
 def find_or_create_store():
     """Finds the persistent store or creates a new one."""
@@ -284,19 +284,75 @@ def update_notes_in_store(file_store, notes_list):
             pass
     
     print("✅ Your cloud notes are now up-to-date!")
+    
+def load_anki_cache():
+    """Loads existing Anki notes into a dictionary {front: back}."""
+    export_file = "anki_export.csv"
+    cache = {}
+    if not os.path.exists(export_file):
+        return cache
+    
+    try:
+        with open(export_file, "r", encoding="utf-8") as csvfile:
+            reader = csv.reader(csvfile, delimiter=';')
+            for row in reader:
+                if len(row) >= 2:
+                    cache[row[0]] = row[1]
+    except Exception as e:
+        print(f"Warning: Could not load Anki cache: {e}")
+    return cache
 
-def append_note_to_anki_csv(note_content):
+def save_note(note_content, response_notes, anki_notes_cache):
     """
-    Parses a single new note and appends it as a new row to the Anki CSV.
+    Parses a single new note and checks for duplicates before saving to Anki CSV.
     """
     export_file = "anki_export.csv"
     
-    front, back = _parse_note_for_anki(note_content)
+    front, back, reason = _parse_note_for_anki(note_content)
     
     # If parsing failed (e.g., it was a grammar note), just stop.
     if not front:
-        return
+        if reason == 'grammar':
+            print("This note is a grammar note, saving to md file.")
+            response_notes.append(f"\n{note_content}\n---")
+            return 1
+        else:
+            print("Not a valid note, skipping.")
+        return 0
 
+    # Duplicate Detection
+    if front in anki_notes_cache:
+        existing_back = anki_notes_cache[front]
+        print(f"\n⚠️  Duplicate Note Found for: {front}")
+        print(f"--- Existing Note ---\n{existing_back}")
+        print(f"--- New Note ---\n{back}")
+        
+        valid_choice = False
+        while not valid_choice:
+            choice = input("Duplicate! (k)eep existing or (o)verwrite with new? ").lower().strip()
+            if choice == 'o':
+                valid_choice = True
+                # Overwrite Logic
+                anki_notes_cache[front] = back
+                try:
+                    with open(export_file, "w", newline='', encoding="utf-8") as csvfile:
+                        writer = csv.writer(csvfile, delimiter=';')
+                        writer.writerow(["Front (German)", "Back (English)"])
+                        for f, b in anki_notes_cache.items():
+                            writer.writerow([f, b])
+                    print(f"✅ Updated entry in {export_file}.")
+                    return 1
+                except Exception as e:
+                    print(f"Error rewriting Anki CSV: {e}")
+                    return 0
+            elif choice == 'k':
+                valid_choice = True
+                print("Keeping existing note.")
+                return 0
+            else:
+                print("Please enter 'k' or 'o'.")
+
+    # New Note Logic
     # Check if the file exists. If not, write the header row first.
     file_exists = os.path.exists(export_file)
     
@@ -310,115 +366,21 @@ def append_note_to_anki_csv(note_content):
             writer.writerow([front, back])
             
         print(f"✅ Also appended to {export_file} for Anki.")
+        anki_notes_cache[front] = back
+        return 1
         
     except Exception as e:
         print(f"Error appending to Anki CSV: {e}")
-
-def export_vocab_for_anki():
-    """
-    Parses the *entire* local notes file using a two-pass system
-    and *overwrites* the Anki CSV. Serves as a full refresh.
-    
-    This function ensures ALL vocabulary content is captured:
-    - Gender (for nouns): (masc.), (fem.), (neut.)
-    - Meaning/definition: English translation
-    - Conjugation (for verbs): Präsens, Präteritum, Partizip II
-    - Examples: usage examples with translations
-    - Plural forms (for nouns)
-    
-    Grammar notes are explicitly excluded from the export.
-    
-    - Pass 1: Finds detailed, multi-line notes (includes all sections).
-    - Pass 2: Finds simple, single-line "handwritten" notes.
-    """
-    export_file = "anki_export.csv"
-    final_export_list = []
-    processed_fronts = set() # To avoid duplicates
-
-    print(f"\nScanning {LOCAL_NOTES_FILE} for all vocabulary (Two-Pass)...")
-    
-    try:
-        with open(LOCAL_NOTES_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # --- PASS 1: Find detailed, multi-line notes (Gemini format) ---
-        # This pass captures complete vocabulary notes with all sections:
-        # gender, meaning, conjugations, examples, etc.
-        print("Pass 1: Searching for detailed (Gemini) notes...")
-        note_blocks = content.split('\n---\n')
-        
-        for block in note_blocks:
-            if not block.strip():
-                continue
-            
-            # _parse_note_for_anki() handles grammar detection and extracts all vocabulary content
-            front, back_html = _parse_note_for_anki(block)
-            if front:
-                # front = German word/phrase
-                # back_html = ALL content (gender, meaning, conjugations, examples) in HTML format
-                final_export_list.append((front, back_html))
-                processed_fronts.add(front)
-        
-        print(f"Found {len(final_export_list)} detailed notes.")
-
-        # --- PASS 2: Find simple, single-line notes (Handwritten format) ---
-        # This pass catches simple vocabulary entries that might not be in note blocks
-        print("Pass 2: Searching for single-line (handwritten) notes...")
-        
-        # Pattern matches: "- **word** (info): meaning" or "* **word** (info): meaning"
-        line_pattern = re.compile(r"^\s*[\*-]\s+\*\*(.*?)\*\*\s*(.*)")
-        
-        lines_found = 0
-        for line in content.split('\n'):
-            # Skip grammar notes in Pass 2 as well
-            if re.search(r'###\s*Grammar:', line, re.IGNORECASE):
-                continue
-                
-            match = line_pattern.search(line)
-            if match:
-                front = match.group(1).strip()
-                back_raw = match.group(2).strip()
-
-                # Skip if it's not a definition (no colon) or if we already processed it
-                # Also skip if it looks like a grammar note
-                if ':' not in back_raw or front in processed_fronts:
-                    continue
-
-                # Convert to HTML preserving all formatting
-                back_html = _markdown_to_html_for_anki(back_raw)
-                final_export_list.append((front, back_html))
-                processed_fronts.add(front) # Add to set just in case
-                lines_found += 1
-
-        print(f"Found {lines_found} additional single-line notes.")
-
-        # --- Write the final combined list to the CSV ---
-        total_found = len(final_export_list)
-        print(f"Found {total_found} total vocabulary entries.")
-
-        if final_export_list:
-            print(f"Overwriting {export_file} with fresh export...")
-            with open(export_file, "w", newline='', encoding="utf-8") as csvfile:
-                writer = csv.writer(csvfile, delimiter=';')
-                writer.writerow(["Front (German)", "Back (English)"])
-                writer.writerows(final_export_list)
-            
-            print(f"✅ Successfully exported {total_found} entries to {export_file}")
-            print("You can now import this file into Anki.")
-        else:
-            print("No vocabulary entries were found in your notes.")
-
-    except FileNotFoundError:
-        print(f"Error: {LOCAL_NOTES_FILE} not found.")
-    except Exception as e:
-        print(f"An error occurred during export: {e}")
+        return 0
 
 # --- 3. Main Conversation Loop (Corrected) ---
 
 def main():
     try:
-        # Setup the store
+        # Configuration and Cache Loading
         file_store = find_or_create_store()
+        anki_notes_cache = load_anki_cache()
+        print(f"Loaded {len(anki_notes_cache)} notes from Anki cache.")
 
         print("\n--- 🤖 German Tutor is Ready ---")
         print(f"Your notes are being managed in '{LOCAL_NOTES_FILE}'")
@@ -432,10 +394,6 @@ def main():
                 print("\nAuf Wiedersehen!")
                 break
 
-            if user_question.lower() == "export":
-                export_vocab_for_anki()
-                continue
-            
             current_retry_count = 0
             while True:
                 try:
@@ -507,14 +465,11 @@ def main():
                 
                 should_ask_again = True
                 while should_ask_again:
-                    save_choice = input("Save this note? (y/n): ").lower()
+                    save_choice = input("Save this note? (y/n): ").lower().strip()
                     
-                    if save_choice == 'y':
+                    if save_choice == 'y' or save_choice == '':
                         should_ask_again = False
-                        note_to_save = f"\n{note_content}\n---"
-                        response_notes.append(note_to_save)
-                        notes_saved_count += 1
-                        append_note_to_anki_csv(note_content)
+                        notes_saved_count += save_note(note_content, response_notes, anki_notes_cache)
                     elif save_choice == 'n':
                         print("Okay, I won't save it.")
                         should_ask_again = False
