@@ -8,6 +8,8 @@ import re
 import csv
 from google import genai
 from google.genai import types
+from rich.console import Console
+from rich.markdown import Markdown
 
 # --- 1. Configuration ---
 
@@ -31,6 +33,9 @@ LOCAL_NOTES_FILE = "my_german_notes.md"
 STORE_DISPLAY_NAME = "My German Notes Store"
 NOTES_FILE_DISPLAY_NAME = "master_notes_file"
 RETRY_COUNT = 3
+
+# Initialize Rich Console
+console = Console()
 
 # --- SYSTEM INSTRUCTION (No change) ---
 SYSTEM_INSTRUCTION = """
@@ -110,6 +115,18 @@ def _wait_for_operation(operation):
         raise Exception(f"Operation failed: {operation.error}")
     print("File processing Succeeded.")
 
+def render_note_to_console(title, content, style="bold green"):
+    """
+    Renders a note to the console using Rich.
+    Args:
+        title: The title of the note (e.g., "Existing Note", "New Note").
+        content: The content of the note (markdown).
+        style: The style for the title.
+    """
+    console.print(f"\n--- {title} ---", style=style)
+    console.print(Markdown(content))
+    console.print("-" * 20, style="dim")
+
 def _markdown_to_html_for_anki(text):
     """
     Converts markdown to HTML for Anki cards.
@@ -161,6 +178,29 @@ def _markdown_to_html_for_anki(text):
     result = re.sub(r'(<br>){3,}', '<br><br>', result)  # Max 2 consecutive breaks
     
     return result.strip()
+
+def _html_to_markdown_for_console(html_text):
+    """
+    Converts Anki-formatted HTML back to a readable string for the console.
+    This is necessary because the existing notes are stored as HTML in the CSV/cache,
+    but Rich Markdown renderer expects Markdown or plain text, not <br> tags.
+    """
+    if not html_text:
+        return ""
+    
+    # Replace <br> with newlines
+    text = html_text.replace('<br>', '\n')
+    
+    # Replace &nbsp; with spaces
+    text = text.replace('&nbsp;', ' ')
+    
+    # Replace <b> and </b> with ** (or just remove if we want plain text, but ** is better for Rich)
+    text = text.replace('<b>', '**').replace('</b>', '**')
+    
+    # Replace <i> and </i> with *
+    text = text.replace('<i>', '*').replace('</i>', '*')
+    
+    return text
 
 def _parse_note_for_anki(note_content):
     """
@@ -323,9 +363,21 @@ def save_note(note_content, response_notes, anki_notes_cache):
     # Duplicate Detection
     if front in anki_notes_cache:
         existing_back = anki_notes_cache[front]
-        print(f"\n⚠️  Duplicate Note Found for: {front}")
-        print(f"--- Existing Note ---\n{existing_back}")
-        print(f"--- New Note ---\n{back}")
+        # Prepare content for display
+        # Existing note is in HTML (from cache) -> Convert to Markdown for display
+        existing_back_md = _html_to_markdown_for_console(existing_back)
+        
+        # New note back part (back_html) -> Convert that to Markdown for display too, 
+        # or we could use the original markdown if we had it easily. 
+        # Since _html_to_markdown_for_console is simple, let's use it on the generated HTML 
+        # to ensure they look comparable.
+        back_md = _html_to_markdown_for_console(back)
+
+        # Render Existing Note
+        render_note_to_console("Existing Note", f"{front}\n\n{existing_back_md}", style="bold yellow")
+        
+        # Render New Note
+        render_note_to_console("New Note", f"{front}\n\n{back_md}", style="bold green")
         
         valid_choice = False
         while not valid_choice:
@@ -460,8 +512,9 @@ def main():
                 if not note_content: 
                     continue
                 print(f"\n--- Proposal {i} of {len(proposed_notes)} ---")
-                print(note_content)
-                print("---------------------")
+                render_note_to_console(f"Note {i}", note_content, style="bold cyan")
+                # print(note_content)
+                # print("---------------------")
                 
                 should_ask_again = True
                 while should_ask_again:
