@@ -427,6 +427,12 @@ def save_note(note_content, response_notes, anki_notes_cache):
 
 # --- 3. Main Conversation Loop (Corrected) ---
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import InMemoryHistory
+
+# ... imports ...
+
+
 def main():
     try:
         # Configuration and Cache Loading
@@ -439,8 +445,17 @@ def main():
         print("Ask me anything about German. Type 'quit' to exit.")
         print("---------------------------------")
 
+        # Create a PromptSession
+        session = PromptSession(history=InMemoryHistory())
+
         while True:
-            user_question = input("\nYou: ")
+            try:
+                user_question = session.prompt("\nYou: ")
+            except KeyboardInterrupt:
+                continue
+            except EOFError:
+                break
+
             if user_question.lower() in ["quit", "exit"]:
                 client.close()
                 print("\nAuf Wiedersehen!")
