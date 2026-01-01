@@ -1,8 +1,6 @@
 import os
 import os.path
 import time
-import tempfile
-import uuid
 from dotenv import load_dotenv
 import re
 import csv
@@ -30,8 +28,7 @@ except Exception as e:
 
 # --- File and Store Names ---
 LOCAL_NOTES_FILE = "my_german_notes.md" 
-STORE_DISPLAY_NAME = "My German Notes Store"
-NOTES_FILE_DISPLAY_NAME = "master_notes_file"
+ANKI_EXPORT_FILE = "anki_cards.csv"
 RETRY_COUNT = 3
 
 # Initialize Rich Console
@@ -44,26 +41,18 @@ and expand my personal 'My German Notes' knowledge base. You have to explain
 all grammar and vocabulary in English.
 
 When I ask a question:
-1.  FIRST, you MUST search my 'My German Notes' store to find the answer.
-2.  If you find the answer in my notes, please use it and let me know.
-    - If you find partial information, use what you found and supplement with your 
-      general knowledge as needed.
-    - If the search fails or returns no results, proceed with your general knowledge.
-3.  If you do NOT find the answer in my notes, use your own general 
-    knowledge to answer me in English.
-4.  **CRITICAL:** After your complete answer, identify ALL new vocabulary words 
-    and ALL new grammar concepts that were not in my personal 'My German Notes'.
+1.  Use your own general knowledge to answer me in English.
+2.  **CRITICAL:** After your complete answer, identify ALL new vocabulary words.
     - Proposals MUST appear at the END of your response, after your answer.
-    - Distinguish between vocabulary (individual words/phrases) and grammar 
-      (rules, patterns, structures) - create separate proposals for each type.
     - Add Präsens, Präteritum and Partizip II for verbs
     - Add gender, and plural for nouns
     - If any explanation is needed, add before examples
     - Add examples for each item
-5.  You MUST create a separate proposal for EACH new item.
-6.  You MUST format EACH proposal on its OWN new line, starting
+    - **CONSTRAINT**: You MUST NOT prepare a proposal for grammar rules, only make explanations for grammar rules in the answer.
+3.  You MUST create a separate proposal for EACH new item.
+4.  You MUST format EACH proposal on its OWN new line, starting
     with the exact tag `[PROPOSED_NOTE]:`.
-7.  **IMPORTANT:** All proposals MUST be formatted in proper Markdown syntax:
+5.  **IMPORTANT:** All proposals MUST be formatted in proper Markdown syntax:
     - Use `**bold**` for German words and grammar terms
     - Use `*italic*` for examples and emphasis
     - Use proper markdown lists with `-` or `*`
@@ -89,15 +78,6 @@ Example of a correct response with multiple proposals in Markdown:
 - Partizip II: gewusst
 - Explanation: The past tense of 'wissen' is 'wusste' and the partizip II is 'gewusst'.
 - Example: Ich weiß die Antwort. (I know the answer.)
-
-
-[PROPOSED_NOTE]:
-- ### Grammar: 'zu' Preposition
-- 'zu' is a dative-only preposition, meaning the noun that follows it will always be in the dative case.
-- Example: *Ich gehe zu dem Bahnhof.* (I go to the train station.)
-
-Never propose grammar or vocabulary notes that are already in my personal 'My German Notes'.
-Moreover, if the user's question or the notes found are missing an explanation of the grammar or vocabulary, you must explain it in English.
 """
 
 # --- 2. Helper Functions (Now fully corrected) ---
@@ -256,84 +236,14 @@ def _parse_note_for_anki(note_content):
     # If no vocabulary pattern found, it's not a vocabulary note
     return None, None, None
 
-def find_or_create_store():
-    """Finds the persistent store or creates a new one."""
-    if not os.path.exists(LOCAL_NOTES_FILE):
-        print(f"Creating new local file: {LOCAL_NOTES_FILE}")
-        with open(LOCAL_NOTES_FILE, "w", encoding="utf-8") as f:
-            f.write("# My German Notes\n\nThis file is the master copy.\n\n---\n\n")
-
-    print(f"Checking for existing store named '{STORE_DISPLAY_NAME}'...")
-    for store in client.file_search_stores.list():
-        if store.display_name == STORE_DISPLAY_NAME:
-            print(f"Found existing store: {store.name}")
-            return store
-
-    print("Store not found. Creating a new one...")
-    file_store = client.file_search_stores.create(
-        config={'display_name': STORE_DISPLAY_NAME}
-    )
-    print(f"Store created: {file_store.name}")
-    
-    print(f"Uploading initial notes file: {LOCAL_NOTES_FILE}...")
-    op = client.file_search_stores.upload_to_file_search_store(
-        file_search_store_name=file_store.name,
-        file=LOCAL_NOTES_FILE,
-        config={'display_name': NOTES_FILE_DISPLAY_NAME}
-    )
-    _wait_for_operation(op)
-    print("Initial notes uploaded successfully.")
-    return file_store
-
-def update_notes_in_store(file_store, notes_list):
-    """
-    Updates notes in the store. Uploads new notes as separate documents
-    """
-    if not notes_list:
-        return
-    
-    print("Appending notes to local file...")
-    # Write all notes at once to local file
-    with open(LOCAL_NOTES_FILE, "a", encoding="utf-8") as f:
-        for note_content in notes_list:
-            f.write(note_content)
-    print(f"Local file updated with {len(notes_list)} note(s).")
-    # All documents in the store are searchable together
-    print("Uploading new notes as incremental update...")
-    notes_appended = "\n".join(notes_list)
-    # Create a temporary file with just the new note
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as tmp_file:
-        tmp_file.write(notes_appended)
-        tmp_file_path = tmp_file.name
-    
-    try:
-        # Upload as a separate document with unique name
-        unique_name = f"{NOTES_FILE_DISPLAY_NAME}_{uuid.uuid4().hex[:8]}"
-        op = client.file_search_stores.upload_to_file_search_store(
-            file_search_store_name=file_store.name,
-            file=tmp_file_path,
-            config={'display_name': unique_name}
-        )
-        _wait_for_operation(op)
-        print("✅ Uploaded new note")
-    finally:
-        # Clean up temp file
-        try:
-            os.unlink(tmp_file_path)
-        except OSError:
-            pass
-    
-    print("✅ Your cloud notes are now up-to-date!")
-    
 def load_anki_cache():
     """Loads existing Anki notes into a dictionary {front: back}."""
-    export_file = "anki_export.csv"
     cache = {}
-    if not os.path.exists(export_file):
+    if not os.path.exists(ANKI_EXPORT_FILE):
         return cache
     
     try:
-        with open(export_file, "r", encoding="utf-8") as csvfile:
+        with open(ANKI_EXPORT_FILE, "r", encoding="utf-8") as csvfile:
             reader = csv.reader(csvfile, delimiter=';')
             for row in reader:
                 if len(row) >= 2:
@@ -346,18 +256,12 @@ def save_note(note_content, response_notes, anki_notes_cache):
     """
     Parses a single new note and checks for duplicates before saving to Anki CSV.
     """
-    export_file = "anki_export.csv"
     
     front, back, reason = _parse_note_for_anki(note_content)
     
     # If parsing failed (e.g., it was a grammar note), just stop.
     if not front:
-        if reason == 'grammar':
-            print("This note is a grammar note, saving to md file.")
-            response_notes.append(f"\n{note_content}\n---")
-            return 1
-        else:
-            print("Not a valid note, skipping.")
+        print("Not a valid note, skipping.")
         return 0
 
     # Duplicate Detection
@@ -387,12 +291,12 @@ def save_note(note_content, response_notes, anki_notes_cache):
                 # Overwrite Logic
                 anki_notes_cache[front] = back
                 try:
-                    with open(export_file, "w", newline='', encoding="utf-8") as csvfile:
+                    with open(ANKI_EXPORT_FILE, "w", newline='', encoding="utf-8") as csvfile:
                         writer = csv.writer(csvfile, delimiter=';')
                         writer.writerow(["Front (German)", "Back (English)"])
                         for f, b in anki_notes_cache.items():
                             writer.writerow([f, b])
-                    print(f"✅ Updated entry in {export_file}.")
+                    print(f"✅ Updated entry in {ANKI_EXPORT_FILE}.")
                     return 1
                 except Exception as e:
                     print(f"Error rewriting Anki CSV: {e}")
@@ -406,10 +310,10 @@ def save_note(note_content, response_notes, anki_notes_cache):
 
     # New Note Logic
     # Check if the file exists. If not, write the header row first.
-    file_exists = os.path.exists(export_file)
+    file_exists = os.path.exists(ANKI_EXPORT_FILE)
     
     try:
-        with open(export_file, "a", newline='', encoding="utf-8") as csvfile:
+        with open(ANKI_EXPORT_FILE, "a", newline='', encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile, delimiter=';')
             
             if not file_exists:
@@ -417,7 +321,7 @@ def save_note(note_content, response_notes, anki_notes_cache):
             
             writer.writerow([front, back])
             
-        print(f"✅ Also appended to {export_file} for Anki.")
+        print(f"✅ Also appended to {ANKI_EXPORT_FILE} for Anki.")
         anki_notes_cache[front] = back
         return 1
         
@@ -436,12 +340,10 @@ from prompt_toolkit.history import InMemoryHistory
 def main():
     try:
         # Configuration and Cache Loading
-        file_store = find_or_create_store()
         anki_notes_cache = load_anki_cache()
         print(f"Loaded {len(anki_notes_cache)} notes from Anki cache.")
 
         print("\n--- 🤖 German Tutor is Ready ---")
-        print(f"Your notes are being managed in '{LOCAL_NOTES_FILE}'")
         print("Ask me anything about German. Type 'quit' to exit.")
         print("---------------------------------")
 
@@ -469,13 +371,6 @@ def main():
                         contents=user_question,
                         config=types.GenerateContentConfig(
                             system_instruction=SYSTEM_INSTRUCTION,
-                            tools=[
-                                types.Tool(
-                                    file_search=types.FileSearch(
-                                        file_search_store_names=[file_store.name]
-                                    )
-                                )
-                            ]
                         )
                     )
                     if response.text:
@@ -539,15 +434,12 @@ def main():
                         should_ask_again = False
                         notes_saved_count += save_note(note_content, response_notes, anki_notes_cache)
                     elif save_choice == 'n':
-                        print("Okay, I won't save it.")
                         should_ask_again = False
                     else:
                         print("Please enter 'y' or 'n'.")
             
             # Save all notes from this response at once
             if notes_saved_count > 0:
-                print(f"\n✅ Saving {notes_saved_count} new note(s)...")
-                update_notes_in_store(file_store, response_notes)
                 saved_count = notes_saved_count
                 response_notes = []
                 notes_saved_count = 0
