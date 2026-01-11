@@ -8,6 +8,9 @@ from google import genai
 from google.genai import types
 from rich.console import Console
 from rich.markdown import Markdown
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import InMemoryHistory
+from typing import List
 
 # --- 1. Configuration ---
 
@@ -121,7 +124,7 @@ def _markdown_to_html_for_anki(text):
     
     # Split into lines to handle indentation and lists properly
     lines = text.split('\n')
-    html_lines = []
+    html_lines: List[str] = []
     
     for line in lines:
         if not line.strip():
@@ -197,7 +200,7 @@ def _parse_note_for_anki(note_content):
     """
     lines = note_content.strip().split('\n')
     if not lines:
-        return None, None
+        return None, None, None
 
     # Explicit grammar detection: check if note starts with "### Grammar:" or contains "Grammar:" header
     first_line_lower = lines[0].strip().lower()
@@ -331,8 +334,7 @@ def save_note(note_content, response_notes, anki_notes_cache):
 
 # --- 3. Main Conversation Loop (Corrected) ---
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.history import InMemoryHistory
+
 
 # ... imports ...
 
