@@ -3,7 +3,8 @@ import os.path
 import time
 from dotenv import load_dotenv
 import re
-import csv
+import json
+import urllib.request
 from google import genai
 from google.genai import types
 from rich.console import Console
@@ -31,7 +32,9 @@ except Exception as e:
 
 # --- File and Store Names ---
 LOCAL_NOTES_FILE = "my_german_notes.md" 
-ANKI_EXPORT_FILE = "anki_cards.csv"
+ANKI_CONNECT_URL = "http://localhost:8765"
+ANKI_DECK_NAME = "Default"
+ANKI_MODEL_NAME = "Basic"
 RETRY_COUNT = 3
 
 # Initialize Rich Console
@@ -239,25 +242,96 @@ def _parse_note_for_anki(note_content):
     # If no vocabulary pattern found, it's not a vocabulary note
     return None, None, None
 
-def load_anki_cache():
-    """Loads existing Anki notes into a dictionary {front: back}."""
-    cache = {}
-    if not os.path.exists(ANKI_EXPORT_FILE):
-        return cache
-    
+def anki_invoke(action, **params):
+    """
+    Helper to invoke AnkiConnect actions.
+    """
+    requestJson = json.dumps({
+        'action': action,
+        'version': 6,
+        'params': params
+    }).encode('utf-8')
+
     try:
-        with open(ANKI_EXPORT_FILE, "r", encoding="utf-8") as csvfile:
-            reader = csv.reader(csvfile, delimiter=';')
-            for row in reader:
-                if len(row) >= 2:
-                    cache[row[0]] = row[1]
+        response = json.load(urllib.request.urlopen(urllib.request.Request(ANKI_CONNECT_URL, requestJson)))
+        if len(response) != 2:
+            raise Exception('response has an unexpected number of fields')
+        if 'error' not in response:
+            raise Exception('response is missing required error field')
+        if 'result' not in response:
+            raise Exception('response is missing required result field')
+        if response['error'] is not None:
+            raise Exception(response['error'])
+        return response['result']
     except Exception as e:
-        print(f"Warning: Could not load Anki cache: {e}")
+        # If Anki isn't running or AnkiConnect isn't installed, this will fail.
+        # We'll print a warning but not crash immediately, although functionality will be limited.
+        # For this script, we really do want it to work, so maybe re-raising or handling gracefully is better.
+        # But per requirements, we assume Anki is running.
+        print(f"Error invoking AnkiConnect '{action}': {e}")
+        return None
+
+def ensure_deck_exists():
+    """Checks if the configured deck exists, creates it if not."""
+    try:
+        decks = anki_invoke('deckNames')
+        if decks and ANKI_DECK_NAME not in decks:
+            print(f"Deck '{ANKI_DECK_NAME}' not found. Creating it...")
+            anki_invoke('createDeck', deck=ANKI_DECK_NAME)
+            print(f"Created deck '{ANKI_DECK_NAME}'.")
+    except Exception as e:
+        print(f"Could not ensure deck exists: {e}")
+
+def load_anki_cache():
+    """
+    Loads existing Anki notes into a dictionary {front: {'back': back, 'id': noteId}}.
+    Using AnkiConnect to fetch notes from the specific deck.
+    """
+    cache = {}
+    try:
+        ensure_deck_exists()
+        
+        # 1. Find all notes in our deck
+        note_ids = anki_invoke('findNotes', query=f'deck:"{ANKI_DECK_NAME}"')
+        
+        if not note_ids:
+            return cache
+            
+        # 2. Get note info for these IDs
+        # Chunking requests to avoid timeouts (User request: 100 per chunk, 0.5s buffer)
+        chunk_size = 100
+        for i in range(0, len(note_ids), chunk_size):
+            chunk = note_ids[i:i + chunk_size]
+            notes_info = anki_invoke('notesInfo', notes=chunk)
+            
+            if notes_info:
+                for note in notes_info:
+                    # dependent on model having "Front" and "Back" fields
+                    fields = note.get('fields', {})
+                    front_field = fields.get('Front', {})
+                    back_field = fields.get('Back', {})
+                    
+                    if front_field and back_field:
+                        front_val = front_field.get('value', '').strip()
+                        back_val = back_field.get('value', '')
+                        note_id = note.get('noteId')
+                        
+                        if front_val:
+                            # Store both back content and ID so we can update later
+                            cache[front_val] = {'back': back_val, 'id': note_id}
+            
+            # Tiny buffer between chunks
+            time.sleep(0.5)
+                        
+    except Exception as e:
+        print(f"Warning: Could not load Anki cache from AnkiConnect: {e}")
+        print("Make sure Anki is running and AnkiConnect is installed.")
+        
     return cache
 
 def save_note(note_content, response_notes, anki_notes_cache):
     """
-    Parses a single new note and checks for duplicates before saving to Anki CSV.
+    Parses a single new note and checks for duplicates before saving to Anki via AnkiConnect.
     """
     
     front, back, reason = _parse_note_for_anki(note_content)
@@ -269,15 +343,13 @@ def save_note(note_content, response_notes, anki_notes_cache):
 
     # Duplicate Detection
     if front in anki_notes_cache:
-        existing_back = anki_notes_cache[front]
-        # Prepare content for display
-        # Existing note is in HTML (from cache) -> Convert to Markdown for display
-        existing_back_md = _html_to_markdown_for_console(existing_back)
+        # Get existing note data (now a dict with back and id)
+        existing_data = anki_notes_cache[front]
+        existing_back = existing_data.get('back', '')
+        note_id = existing_data.get('id')
         
-        # New note back part (back_html) -> Convert that to Markdown for display too, 
-        # or we could use the original markdown if we had it easily. 
-        # Since _html_to_markdown_for_console is simple, let's use it on the generated HTML 
-        # to ensure they look comparable.
+        # Prepare content for display
+        existing_back_md = _html_to_markdown_for_console(existing_back)
         back_md = _html_to_markdown_for_console(back)
 
         # Render Existing Note
@@ -291,18 +363,21 @@ def save_note(note_content, response_notes, anki_notes_cache):
             choice = input("Duplicate! (k)eep existing or (o)verwrite with new? ").lower().strip()
             if choice == 'o':
                 valid_choice = True
-                # Overwrite Logic
-                anki_notes_cache[front] = back
+                # Overwrite Logic via AnkiConnect
                 try:
-                    with open(ANKI_EXPORT_FILE, "w", newline='', encoding="utf-8") as csvfile:
-                        writer = csv.writer(csvfile, delimiter=';')
-                        writer.writerow(["Front (German)", "Back (English)"])
-                        for f, b in anki_notes_cache.items():
-                            writer.writerow([f, b])
-                    print(f"✅ Updated entry in {ANKI_EXPORT_FILE}.")
+                    anki_invoke('updateNoteFields', note={
+                        'id': note_id,
+                        'fields': {
+                            'Front': front,
+                            'Back': back
+                        }
+                    })
+                    print(f"✅ Updated entry in Anki (ID: {note_id}).")
+                    # Update cache
+                    anki_notes_cache[front]['back'] = back
                     return 1
                 except Exception as e:
-                    print(f"Error rewriting Anki CSV: {e}")
+                    print(f"Error updating note in Anki: {e}")
                     return 0
             elif choice == 'k':
                 valid_choice = True
@@ -312,24 +387,30 @@ def save_note(note_content, response_notes, anki_notes_cache):
                 print("Please enter 'k' or 'o'.")
 
     # New Note Logic
-    # Check if the file exists. If not, write the header row first.
-    file_exists = os.path.exists(ANKI_EXPORT_FILE)
-    
     try:
-        with open(ANKI_EXPORT_FILE, "a", newline='', encoding="utf-8") as csvfile:
-            writer = csv.writer(csvfile, delimiter=';')
-            
-            if not file_exists:
-                writer.writerow(["Front (German)", "Back (English)"])
-            
-            writer.writerow([front, back])
-            
-        print(f"✅ Also appended to {ANKI_EXPORT_FILE} for Anki.")
-        anki_notes_cache[front] = back
-        return 1
+        result = anki_invoke('addNote', note={
+            'deckName': ANKI_DECK_NAME,
+            'modelName': ANKI_MODEL_NAME,
+            'fields': {
+                'Front': front,
+                'Back': back
+            },
+            'options': {
+                'allowDuplicate': False
+            },
+            'tags': ['german_tutor']
+        })
+        
+        if result:
+            print(f"✅ Added new note to Anki deck '{ANKI_DECK_NAME}' (ID: {result}).")
+            anki_notes_cache[front] = {'back': back, 'id': result}
+            return 1
+        else:
+            print("Failed to add note (AnkiConnect returned None).")
+            return 0
         
     except Exception as e:
-        print(f"Error appending to Anki CSV: {e}")
+        print(f"Error adding note to Anki: {e}")
         return 0
 
 # --- 3. Main Conversation Loop (Corrected) ---
@@ -424,9 +505,14 @@ def main():
                 if not note_content: 
                     continue
                 print(f"\n--- Proposal {i} of {len(proposed_notes)} ---")
-                render_note_to_console(f"Note {i}", note_content, style="bold cyan")
-                # print(note_content)
-                # print("---------------------")
+                
+                # Check for existence to add indicator
+                front_check, _, _ = _parse_note_for_anki(note_content)
+                title_suffix = ""
+                if front_check and front_check in anki_notes_cache:
+                    title_suffix = " [EXISTING]"
+                
+                render_note_to_console(f"Note {i}{title_suffix}", note_content, style="bold cyan")
                 
                 should_ask_again = True
                 while should_ask_again:
