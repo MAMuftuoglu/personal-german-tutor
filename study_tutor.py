@@ -57,13 +57,8 @@ When I ask a question:
     - Add examples for each item
     - **CONSTRAINT**: You MUST NOT prepare a proposal for grammar rules, only make explanations for grammar rules in the answer.
 3.  You MUST create a separate proposal for EACH new item.
-{
-        '''
 4.  You MUST format EACH proposal on its OWN new line, starting
-    with the exact tag `[PROPOSED_NOTE]:`.'''
-        if not is_check_yomitan
-        else ""
-    }
+    with the exact tag "{ "[CARD_FEEDBACK]:" if is_check_yomitan else "[PROPOSED_NOTE]:" }".
 5.  **IMPORTANT:** All proposals MUST be formatted in proper Markdown syntax:
     - Use `**bold**` for German words and grammar terms
     - Use `*italic*` for examples and emphasis
@@ -73,11 +68,11 @@ When I ask a question:
 Example of a correct response with multiple proposals in Markdown:
 <The model's answer to the user's question>
 
-[PROPOSED_NOTE]:
+{"[CARD_FEEDBACK]:" if is_check_yomitan else "[PROPOSED_NOTE]:"}
 - **die Ankunft** (fem.): arrival
 - Example: *Die Ankunft des Zuges ist um 14:30 Uhr.*
 
-[PROPOSED_NOTE]:
+{"[CARD_FEEDBACK]:" if is_check_yomitan else "[PROPOSED_NOTE]:"}
 - wissen;(reg. verb): to know (a fact, information)
 - Conjugation (present tense):
     - ich weiß
@@ -88,6 +83,7 @@ Example of a correct response with multiple proposals in Markdown:
     - sie/Sie wissen
 - Past tense (Präteritum): wusste
 - Partizip II: gewusst
+    - Auxiliary verb: haben
 - Explanation: The past tense of 'wissen' is 'wusste' and the partizip II is 'gewusst'.
 - Example: Ich weiß die Antwort. (I know the answer.)
 """
@@ -476,7 +472,8 @@ def check_yomitan_cards(client):
         Batch:
         {chr(10).join(batch_content)}
         
-        Provide your feedback for each card individually.
+        Provide your feedback for each card individually. 
+        IMPORTANT: You MUST start the feedback for EVERY card with the tag `[CARD_FEEDBACK]:`.
         """
 
         print(f"\n--- Checking Batch {(i // batch_size) + 1} of {(len(notes) + batch_size - 1) // batch_size} ---")
@@ -489,8 +486,25 @@ def check_yomitan_cards(client):
                 ),
             )
             if response.text:
-                console.print(Markdown(response.text))
+                feedback_items = response.text.split("[CARD_FEEDBACK]:")
+                # First part might be general intro text, skip if empty or just whitespace
+                if not feedback_items[0].strip():
+                    feedback_items = feedback_items[1:]
                 
+                for idx, feedback in enumerate(feedback_items):
+                    feedback = feedback.strip()
+                    if not feedback:
+                        continue
+                        
+                    console.print(f"\n--- Feedback {idx + 1} of {len(feedback_items)} ---", style="bold cyan")
+                    console.print(Markdown(feedback))
+                    
+                    # Wait for user to press enter for next item
+                    if idx < len(feedback_items) - 1:
+                        input("\nPress Enter to see the next result...")
+                    else:
+                        print("\nEnd of batch results.")
+
                 # Remove the 'yomitan' tag from processed notes
                 if note_ids:
                     # AnkiConnect 'removeTags' expects tags as a space-separated string
@@ -502,7 +516,7 @@ def check_yomitan_cards(client):
 
                 # Wait for user input before next batch or exit
                 if i + batch_size < len(notes):
-                    choice = input("\nPress Enter to see the next batch, or type 'q' to quit: ").lower().strip()
+                    choice = input("\nPress Enter to go to the next batch, or type 'q' to quit: ").lower().strip()
                     if choice in ['q', 'quit']:
                         print("Exiting Yomitan check.")
                         break
