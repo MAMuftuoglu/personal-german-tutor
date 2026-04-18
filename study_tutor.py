@@ -1,7 +1,4 @@
-import os
-import os.path
 import time
-from dotenv import load_dotenv
 import re
 import json
 import urllib.request
@@ -9,14 +6,15 @@ from google import genai
 from google.genai import types
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.markup import escape
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from typing import List
 
 # --- 1. Configuration ---
 
-load_dotenv()
-API_KEY = os.environ.get("GOOGLE_API_KEY")
+from config import API_KEY, ANKI_CONNECT_URL, ANKI_DECK_NAME, ANKI_MODEL_NAME, RETRY_COUNT, MODEL_NAME
 
 if not API_KEY:
     raise ValueError("Error: GOOGLE_API_KEY not set. Make sure you have a .env file with the key.")
@@ -28,14 +26,6 @@ except Exception as e:
     print("Error initializing Google GenAI Client.")
     print("This can be due to an invalid API key or network issues.")
     raise e
-
-
-# --- File and Store Names ---
-LOCAL_NOTES_FILE = "my_german_notes.md"
-ANKI_CONNECT_URL = "http://localhost:8765"
-ANKI_DECK_NAME = "Default"
-ANKI_MODEL_NAME = "Basic"
-RETRY_COUNT = 3
 
 # Initialize Rich Console
 console = Console()
@@ -64,6 +54,7 @@ When I ask a question:
     - Use `*italic*` for examples and emphasis
     - Use proper markdown lists with `-` or `*`
     - Use `##` for section headers if needed
+6. Add explanation only when a clear explanation is needed. Don't add explanation for every item if the explanation is basic.
 
 Example of a correct response with multiple proposals in Markdown:
 <The model's answer to the user's question>
@@ -73,20 +64,26 @@ Example of a correct response with multiple proposals in Markdown:
 - Example: *Die Ankunft des Zuges ist um 14:30 Uhr.*
 
 {"[CARD_FEEDBACK]:" if is_check_yomitan else "[PROPOSED_NOTE]:"}
-- wissen;(reg. verb): to know (a fact, information)
-- Conjugation (present tense):
-    - ich weiß
-    - du weißt
-    - er/sie/es weiß
-    - wir wissen
-    - ihr wisst
-    - sie/Sie wissen
-- Past tense (Präteritum): wusste
-- Partizip II: gewusst
-    - Auxiliary verb: haben
-- Explanation: The past tense of 'wissen' is 'wusste' and the partizip II is 'gewusst'.
-- Example: Ich weiß die Antwort. (I know the answer.)
-"""
+(reg. verb): to believe
+
+<div style="text-align: left;">Conjugation (Präsens - present tense):
+    ich glaube (I believe)
+    du glaubst (you believe)
+    er/sie/es glaubt (he/she/it believes)
+    wir glauben (we believe)
+    ihr glaubt (you all believe)
+    sie/Sie glauben (they/you (formal) believe)
+
+Präteritum (simple past): glaubte
+Partizip II (past participle): geglaubt (haben)
+
+Explanation: This verb is used to express belief, opinion, or faith.
+
+Examples:
+    Ich glaube, dass es morgen regnen wird. (I believe that it will rain tomorrow.)
+    Er glaubt an Gott. (He believes in God.)
+    Hast du mir geglaubt? (Did you believe me?)
+</div>"""
 
 # --- 2. Helper Functions (Now fully corrected) ---
 
@@ -429,10 +426,83 @@ def get_notes_by_tag(tag):
         return []
 
 
-def check_yomitan_cards(client):
+def _format_html_for_display(html_content):
+    """Formats raw HTML for readable display in the Rich console."""
+    text = re.sub(r'(<br\s*/?>)', r'\1\n', html_content)
+    text = re.sub(r'(</div>)', r'\1\n', text)
+    text = escape(text)
+    return text.strip()
+
+
+def get_yomitan_system_prompt():
+    """Returns the system prompt for checking/reformatting Yomitan cards."""
+    return """
+You are a German language assistant. Your task is to review and reformat Anki card content.
+
+INPUT: You will receive the Front (word) and Back (explanation) of an Anki card.
+OUTPUT: You must return the corrected/reformatted Front and Back fields using the markers below.
+
+You MUST output your result in this exact format:
+[FRONT]: <the corrected front value>
+[BACK]: <the corrected back value as a single line of HTML>
+
+Structure for the Back field:
+1. Meaning (and grammatical info if applicable) - This should be at the top, standard alignment (usually centered by Anki styling, so just plain text).
+2. Plural (if it's a noun and exists) - Plain text.
+3. Conjugation (if it's a verb) - LEFT ALIGNED.
+   - Conjugation of a verb MUST include the auxiliary verbs used for it in Partizip II. In some cases where both used, include an explanation under the EXPLANATION section.
+   - For Präteritum, only include the 1st person singular form.
+4. Explanations (if present) - LEFT ALIGNED.
+5. Examples - LEFT ALIGNED.
+
+HTML Structure Rule:
+- For the top part (Meaning, Plural), use plain text or simple <div> if needed, but DO NOT force left alignment.
+- For ALL subsequent sections (Conjugation, Explanation, Examples), you MUST wrap them in `<div style="text-align: left;">...</div>` blocks.
+- Use `<br>` for line breaks.
+- Use `&nbsp;` for indentation in lists/tables if needed.
+
+Example of the REQUIRED Output Format:
+[FRONT]: sich (Dat.) etwas vorstellen
+[BACK]: (verb, weak, reflexive with dative object): to imagine something<br><br><div style="text-align: left;">Präsens:</div><div style="text-align: left;">&nbsp; &nbsp; ich stelle mir vor</div><div style="text-align: left;">&nbsp; &nbsp; du stellst dir vor</div><div style="text-align: left;">&nbsp; &nbsp; er/sie/es stellt sich vor</div><div style="text-align: left;">&nbsp; &nbsp; wir stellen uns vor</div><div style="text-align: left;">&nbsp; &nbsp; ihr stellt euch vor</div><div style="text-align: left;">&nbsp; &nbsp; sie/Sie stellen sich vor</div><div style="text-align: left;"><br></div><div style="text-align: left;">Präteritum: stellte sich vor</div><div style="text-align: left;">Partizip II: sich vorgestellt (haben)</div><div style="text-align: left;"><br></div><div style="text-align: left;">Explanation: This reflexive verb is used when you imagine something in your mind.</div><div style="text-align: left;"><br></div><div style="text-align: left;">Example: <i>Ich kann mir ein Leben ohne Musik nicht vorstellen.</i> (I cannot imagine a life without music.)</div>
+
+CRITICAL:
+- Do NOT wrap the output in markdown code blocks (```html ... ```). Output the raw values directly after the markers.
+- The [BACK] value MUST be a single line of HTML — use <br> instead of actual newlines.
+- Ensure the conjugation list is complete for the requested tense if available.
+- If the original card doesn't have certain info (like examples), do not invent it unless it's obviously missing and you can confidently provide it (but prefer sticking to the original content's intent, just reformatting).
+- However, if the input card IS missing standard conjugations for a verb, PLEASE ADD THEM in the correct format.
+- If the input card IS missing gender/plural for a noun, PLEASE ADD THEM.
+- If the input card IS missing auxiliary verb for partizip II for a verb, PLEASE ADD THEM.
+- The [FRONT] should be the clean German word/phrase (with article for nouns, reflexive pronouns for reflexive verbs, etc.).
+"""
+
+
+def _parse_yomitan_response(response_text):
     """
-    Fetches cards tagged 'yomitan', batches them by 10,
-    and asks the LLM to verify their explanations.
+    Parses the LLM response to extract [FRONT] and [BACK] values.
+    Returns (front, back) or (None, None) if parsing fails.
+    """
+    front_match = re.search(r'\[FRONT\]:\s*(.+?)(?=\n\[BACK\]:|$)', response_text, re.DOTALL)
+    back_match = re.search(r'\[BACK\]:\s*(.+)', response_text, re.DOTALL)
+
+    if not front_match or not back_match:
+        return None, None
+
+    front = front_match.group(1).strip()
+    back = back_match.group(1).strip()
+
+    # Clean up any markdown code block wrappers the LLM might add despite instructions
+    back = re.sub(r'^```html\s*', '', back)
+    back = re.sub(r'\s*```$', '', back)
+
+    return front, back
+
+
+def check_yomitan_cards(client, anki_notes_cache):
+    """
+    Fetches cards tagged 'yomitan', processes them one-by-one,
+    asks the LLM to review/reformat, and lets the user confirm
+    before updating the card in Anki.
     """
     print("Fetching notes with tag 'yomitan'...")
     notes = get_notes_by_tag("yomitan")
@@ -441,90 +511,91 @@ def check_yomitan_cards(client):
         print("No notes found with tag 'yomitan'.")
         return
 
-    print(f"Found {len(notes)} notes. Processing in batches of 10...")
+    print(f"Found {len(notes)} notes. Processing one by one...")
+    processed_note_ids = []
 
-    batch_size = 10
-    for i in range(0, len(notes), batch_size):
-        batch = notes[i : i + batch_size]
-        batch_content = []
-        note_ids = []
+    for i, note in enumerate(notes):
+        note_id = note.get("noteId")
+        fields = note.get("fields", {})
+        front = fields.get("Front", {}).get("value") or fields.get("Word", {}).get("value", "")
+        back = fields.get("Back", {}).get("value") or fields.get("Glossary", {}).get("value", "")
 
-        for note in batch:
-            note_id = note.get("noteId")
-            if note_id:
-                note_ids.append(note_id)
+        if not front:
+            console.print(f"[yellow]Skipping card {i+1}/{len(notes)} — no front value.[/yellow]")
+            continue
 
-            fields = note.get("fields", {})
-            # Yomitan cards often have 'Word' and 'Glossary', but we'll try Front/Back first
-            # as per existing codebase, but also check for typical Yomitan fields
-            front = fields.get("Front", {}).get("value") or fields.get("Word", {}).get("value", "No Word/Front")
-            back = fields.get("Back", {}).get("value") or fields.get("Glossary", {}).get("value", "No Back/Glossary")
+        # Display current card
+        console.rule(f"Card {i+1}/{len(notes)}")
+        console.print(f"[bold]Front:[/bold] {front}")
+        console.print(Panel(_format_html_for_display(back), title="Current Back", style="yellow"))
 
-            # Strip HTML for the prompt
-            back_plain = _html_to_markdown_for_console(back)
-            batch_content.append(f"Word: {front}\nExplanation: {back_plain}")
+        # Send to LLM
+        back_plain = _html_to_markdown_for_console(back)
+        prompt = f"Front: {front}\nBack (Current Content):\n{back_plain}"
 
-        prompt = f"""
-        I have a batch of German vocabulary cards from Anki. 
-        Please review each of the following cards and check if the explanation is accurate and helpful.
-        If there are any errors or if the explanation could be significantly improved (e.g., missing gender, plural, or conjugations), please provide constructive feedback.
-        
-        Batch:
-        {chr(10).join(batch_content)}
-        
-        Provide your feedback for each card individually. 
-        IMPORTANT: You MUST start the feedback for EVERY card with the tag `[CARD_FEEDBACK]:`.
-        """
-
-        print(f"\n--- Checking Batch {(i // batch_size) + 1} of {(len(notes) + batch_size - 1) // batch_size} ---")
+        console.print("[dim]Asking Gemini to review...[/dim]")
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash-lite",  # Use 2.0-flash as it's faster and reliable
+                model=MODEL_NAME,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=get_system_instruction(is_check_yomitan=True)
+                    system_instruction=get_yomitan_system_prompt(),
+                    temperature=0.1,
                 ),
             )
-            if response.text:
-                feedback_items = response.text.split("[CARD_FEEDBACK]:")
-                # First part might be general intro text, skip if empty or just whitespace
-                if not feedback_items[0].strip():
-                    feedback_items = feedback_items[1:]
-                
-                for idx, feedback in enumerate(feedback_items):
-                    feedback = feedback.strip()
-                    if not feedback:
-                        continue
-                        
-                    console.print(f"\n--- Feedback {idx + 1} of {len(feedback_items)} ---", style="bold cyan")
-                    console.print(Markdown(feedback))
-                    
-                    # Wait for user to press enter for next item
-                    if idx < len(feedback_items) - 1:
-                        input("\nPress Enter to see the next result...")
-                    else:
-                        print("\nEnd of batch results.")
 
-                # Remove the 'yomitan' tag from processed notes
-                if note_ids:
-                    # AnkiConnect 'removeTags' expects tags as a space-separated string
-                    result = anki_invoke("removeTags", notes=note_ids, tags="yomitan")
-                    if result is not None:
-                        print(f"Removed 'yomitan' tag from {len(note_ids)} notes.")
-                    else:
-                        print(f"Failed to remove 'yomitan' tag from {len(note_ids)} notes.")
+            if not response.text:
+                console.print("[red]No response from the model. Skipping.[/red]")
+                continue
 
-                # Wait for user input before next batch or exit
-                if i + batch_size < len(notes):
-                    choice = input("\nPress Enter to go to the next batch, or type 'q' to quit: ").lower().strip()
-                    if choice in ['q', 'quit']:
-                        print("Exiting Yomitan check.")
-                        break
-            else:
-                print("No response from the model for this batch.")
+            new_front, new_back = _parse_yomitan_response(response.text)
+
+            if not new_front or not new_back:
+                console.print("[red]Could not parse model response. Raw output:[/red]")
+                console.print(response.text)
+                continue
+
+            # Show proposed changes
+            existing_info = " [yellow](Exists in cache!)[/yellow]" if new_front in anki_notes_cache else ""
+            console.print(f"\n[bold]Proposed Front:[/bold] {new_front}{existing_info}")
+            console.print(Panel(_format_html_for_display(new_back), title="Proposed Back", style="green"))
+
+            # Confirmation loop
+            while True:
+                choice = console.input("[bold cyan]Apply this change? (y)es / (n)o / (q)uit: [/bold cyan]").lower().strip()
+
+                if choice in ('y', 'yes', ''):
+                    try:
+                        anki_invoke("updateNoteFields", note={"id": note_id, "fields": {"Front": new_front, "Back": new_back}})
+                        console.print("[bold green]✅ Updated.[/bold green]")
+                        processed_note_ids.append(note_id)
+                    except Exception as e:
+                        console.print(f"[bold red]❌ Update failed: {e}[/bold red]")
+                    break
+                elif choice in ('n', 'no'):
+                    console.print("[yellow]Skipped.[/yellow]")
+                    processed_note_ids.append(note_id)
+                    break
+                elif choice in ('q', 'quit'):
+                    console.print("[bold red]Exiting Yomitan check.[/bold red]")
+                    # Remove tag from cards processed so far before quitting
+                    if processed_note_ids:
+                        anki_invoke("removeTags", notes=processed_note_ids, tags="yomitan")
+                        console.print(f"[dim]Removed 'yomitan' tag from {len(processed_note_ids)} processed card(s).[/dim]")
+                    return
+                else:
+                    console.print("Invalid choice. Please enter y, n, or q.")
+
         except Exception as e:
-            print(f"Error checking batch: {e}")
+            console.print(f"[red]Error processing card: {e}[/red]")
+            continue
 
+    # Remove 'yomitan' tag from all processed notes
+    if processed_note_ids:
+        anki_invoke("removeTags", notes=processed_note_ids, tags="yomitan")
+        console.print(f"\n[bold green]Done! Removed 'yomitan' tag from {len(processed_note_ids)} processed card(s).[/bold green]")
+    else:
+        console.print("\n[yellow]No cards were processed.[/yellow]")
 
 
 # --- 3. Main Conversation Loop (Corrected) ---
@@ -560,14 +631,14 @@ def main():
                 break
 
             if user_question.lower() == "check yomitan":
-                check_yomitan_cards(client)
+                check_yomitan_cards(client, anki_notes_cache)
                 continue
 
             current_retry_count = 0
             while True:
                 try:
                     response = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model=MODEL_NAME,
                         contents=user_question,
                         config=types.GenerateContentConfig(
                             system_instruction=get_system_instruction(is_check_yomitan=False),

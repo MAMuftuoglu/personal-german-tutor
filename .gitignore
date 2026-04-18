@@ -1,3 +1,5 @@
 .env
 *.csv
 my_german_notes.md
+fix_anki_alignment.py
+__pycache__/*
